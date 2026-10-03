@@ -124,23 +124,52 @@ struct TimelineNode
 };
 class Timeline
 {
-    TimelineNode* head, * tail;
+    TimelineNode* head;
+    TimelineNode* tail;
     int32_t stepCount;
 
 public:
-    // Implement these functions
     Timeline()
     {
+        head = nullptr;
+        tail = nullptr;
+        stepCount = 0;
     }
+
     void record(Snapshot* s)
     {
-        // add record in the timeline
+        if (s == nullptr)
+        {
+            return;
+        }
+
+        TimelineNode* newNode = new TimelineNode;
+
+        newNode->data = s;
+        newNode->next = nullptr;
+        newNode->prev = tail;
+
+        if (head == nullptr)
+        {
+            head = newNode;
+        }
+        else
+        {
+            tail->next = newNode;
+        }
+
+        tail = newNode;
+        stepCount++;
     }
+
     TimelineNode* begin()
     {
+        return head;
     }
+
     int32_t getStepCount()
     {
+        return stepCount;
     }
 };
 
@@ -191,52 +220,429 @@ struct PendingPatch
     string targetFuncName;
 };
 
-
-
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream& in, string& out)
 {
-    // reads the next nonblank line
+    string line;
+
+    while (getline(in, line))
+    {
+        if (!line.empty())
+        {
+            out = line;
+            return true;
+        }
+    }
+
+    return false;
 }
 string firstWord(const string& line)
 {
-    // returns first word from the input string
+    size_t start = line.find_first_not_of(" \t");
+
+    if (start == string::npos)
+    {
+        return "";
+    }
+
+    size_t end = line.find_first_of(" \t", start);
+
+    if (end == string::npos)
+    {
+        return line.substr(start);
+    }
+
+    return line.substr(start, end - start);
 }
 string secondWord(const string& line)
 {
-    // returns the second word
+    size_t firstStart = line.find_first_not_of(" \t");
+
+    if (firstStart == string::npos)
+    {
+        return "";
+    }
+
+    size_t firstEnd = line.find_first_of(" \t", firstStart);
+
+    if (firstEnd == string::npos)
+    {
+        return "";
+    }
+
+    size_t secondStart = line.find_first_not_of(" \t", firstEnd);
+
+    if (secondStart == string::npos)
+    {
+        return "";
+    }
+
+    size_t secondEnd = line.find_first_of(" \t", secondStart);
+
+    if (secondEnd == string::npos)
+    {
+        return line.substr(secondStart);
+    }
+
+    return line.substr(secondStart, secondEnd - secondStart);
 }
 bool validateProgram(const char* sourcePath)
 {
-    // for each func defined there should be exactly one func_end and no nested funcs allowed - 
+    ifstream in(sourcePath);
+
+    if (!in.is_open())
+    {
+        return false;
+    }
+
+    string line;
+    bool insideFunction = false;
+    int32_t functionCount = 0;
+
+    while (readSourceLine(in, line))
+    {
+        string keyword = firstWord(line);
+
+        if (keyword.empty())
+        {
+            continue;
+        }
+
+        if (keyword == "func")
+        {
+            // Nested functions are not allowed.
+            if (insideFunction)
+            {
+                return false;
+            }
+
+            // FUNC must have a function name.
+            string functionName = secondWord(line);
+
+            if (functionName.empty())
+            {
+                return false;
+            }
+
+            insideFunction = true;
+            functionCount++;
+        }
+        else if (keyword == "func_end")
+        {
+            // FUNC_END without a matching FUNC is invalid.
+            if (!insideFunction)
+            {
+                return false;
+            }
+
+            insideFunction = false;
+        }
+    }
+
+    // A function cannot be left open.
+    if (insideFunction)
+    {
+        return false;
+    }
+
+    // Program must contain at least one function.
+    if (functionCount == 0)
+    {
+        return false;
+    }
+
+    return true;
 }
 
 // PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE* f, int64_t offsetField, const string& text)
 {
-    // writes one [offset(8B)][size(4B)][string] record at the current file position
-    // returns this record's own starting byte position
+    if (f == nullptr)
+    {
+        return -1;
+    }
+
+    int64_t recordPosition = ftell(f);
+
+    if (recordPosition < 0)
+    {
+        return -1;
+    }
+
+    uint32_t stringSize = static_cast<uint32_t>(text.size());
+
+    fwrite(&offsetField, sizeof(int64_t), 1, f);
+    fwrite(&stringSize, sizeof(uint32_t), 1, f);
+
+    if (stringSize > 0)
+    {
+        fwrite(text.data(), 1, stringSize, f);
+    }
+
+    return recordPosition;
 }
 int64_t readResolveRecord(FILE* f, string& outText)
 {
-    // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
+    if (f == nullptr)
+    {
+        return -1;
+    }
+
+    int64_t offsetField;
+    uint32_t stringSize;
+
+    size_t readOffset = fread(
+        &offsetField,
+        sizeof(int64_t),
+        1,
+        f
+    );
+
+    if (readOffset != 1)
+    {
+        return -1;
+    }
+
+    size_t readSize = fread(
+        &stringSize,
+        sizeof(uint32_t),
+        1,
+        f
+    );
+
+    if (readSize != 1)
+    {
+        return -1;
+    }
+
+    outText.clear();
+
+    if (stringSize > 0)
+    {
+        outText.resize(stringSize);
+
+        size_t readString = fread(
+            &outText[0],
+            1,
+            stringSize,
+            f
+        );
+
+        if (readString != stringSize)
+        {
+            outText.clear();
+            return -1;
+        }
+    }
+
+    return offsetField;
 }
 int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 {
     FuncEntry funcArray[MAX_FUNCS];
     int32_t funcCount = 0;
+
     PendingPatch patches[MAX_PATCHES];
     int32_t patchCount = 0;
-    // Every source line becomes one record holding the raw line, as-is.
-    // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
-    // (remember its position) and CALL (remember which function it needs
-    // and where its offset field sits).
-    // Once the whole file is written, every CALL's offset field is patched
-    // with its target's position. Patching happens after the full write
-    // Returns the byte offset of main's FUNC header record.
-    // if there is no main return the error 
-}
 
+    ifstream source(sourcePath);
+
+    if (!source.is_open())
+    {
+        return -1;
+    }
+
+    FILE* resolveFile = fopen(resolveBinPath, "wb+");
+
+    if (resolveFile == nullptr)
+    {
+        return -1;
+    }
+
+    string line;
+    int64_t currentOffset = 0;
+    int64_t mainOffset = -1;
+
+    // -------------------------------------------------
+    // First pass:
+    // Write every source line into resolve.bin
+    // and remember FUNC/CALL information.
+    // -------------------------------------------------
+
+    while (readSourceLine(source, line))
+    {
+        string keyword = firstWord(line);
+
+        // Write this line as one resolve record.
+        int64_t recordPosition =
+            writeResolveRecord(resolveFile, currentOffset, line);
+
+        if (recordPosition < 0)
+        {
+            fclose(resolveFile);
+            return -1;
+        }
+
+        // ---------------------------------------------
+        // FUNC
+        // ---------------------------------------------
+
+        if (keyword == "func")
+        {
+            string functionName = secondWord(line);
+
+            if (functionName.empty())
+            {
+                fclose(resolveFile);
+                return -1;
+            }
+
+            if (funcCount >= MAX_FUNCS)
+            {
+                fclose(resolveFile);
+                return -1;
+            }
+
+            // Check duplicate function name.
+            for (int32_t i = 0; i < funcCount; i++)
+            {
+                if (funcArray[i].funcName == functionName)
+                {
+                    fclose(resolveFile);
+                    return -1;
+                }
+            }
+
+            funcArray[funcCount].funcName = functionName;
+            funcArray[funcCount].byteOffsetInResolveBin =
+                recordPosition;
+
+            if (functionName == "main")
+            {
+                mainOffset = recordPosition;
+            }
+
+            funcCount++;
+        }
+
+        // ---------------------------------------------
+        // CALL
+        // ---------------------------------------------
+
+        else if (keyword == "call")
+        {
+            string targetFunction = secondWord(line);
+
+            if (targetFunction.empty())
+            {
+                fclose(resolveFile);
+                return -1;
+            }
+
+            if (patchCount >= MAX_PATCHES)
+            {
+                fclose(resolveFile);
+                return -1;
+            }
+
+            /*
+                Record layout:
+
+                [8 bytes offset]
+                [4 bytes string size]
+                [string]
+
+                The CALL target offset is stored in
+                the 8-byte offset field.
+
+                This field begins at recordPosition.
+            */
+
+            patches[patchCount].byteOffsetOfOffsetField =
+                recordPosition;
+
+            patches[patchCount].targetFuncName =
+                targetFunction;
+
+            patchCount++;
+        }
+
+        // Next record begins after:
+        // 8 bytes offset
+        // 4 bytes size
+        // string bytes
+        currentOffset +=
+            sizeof(int64_t) +
+            sizeof(uint32_t) +
+            static_cast<int64_t>(line.size());
+    }
+
+    source.close();
+
+    // -------------------------------------------------
+    // main must exist.
+    // -------------------------------------------------
+
+    if (mainOffset < 0)
+    {
+        fclose(resolveFile);
+        return -1;
+    }
+
+    // -------------------------------------------------
+    // Second pass:
+    // Resolve every CALL target.
+    // -------------------------------------------------
+
+    for (int32_t i = 0; i < patchCount; i++)
+    {
+        int64_t targetOffset = -1;
+
+        for (int32_t j = 0; j < funcCount; j++)
+        {
+            if (funcArray[j].funcName ==
+                patches[i].targetFuncName)
+            {
+                targetOffset =
+                    funcArray[j].byteOffsetInResolveBin;
+
+                break;
+            }
+        }
+
+        // Undefined function.
+        if (targetOffset < 0)
+        {
+            fclose(resolveFile);
+            return -1;
+        }
+
+        // Go to the offset field of this CALL record.
+        if (fseek(
+            resolveFile,
+            patches[i].byteOffsetOfOffsetField,
+            SEEK_SET) != 0)
+        {
+            fclose(resolveFile);
+            return -1;
+        }
+
+        // Patch the CALL target offset.
+        if (fwrite(
+            &targetOffset,
+            sizeof(int64_t),
+            1,
+            resolveFile) != 1)
+        {
+            fclose(resolveFile);
+            return -1;
+        }
+    }
+
+    fclose(resolveFile);
+
+    return mainOffset;
+}
 // PASS 0x2: EXECUTION (tokenization happens here)
 enum TokenType
 {
@@ -251,12 +657,70 @@ struct Token
 };
 int32_t tokenizeLine(const string& line, Token tokens[], int32_t maxTokens)
 {
-    // first word is always a instruction keyword
-    // instruction set = [func, func_end, call, set, add, sub, mul and div]
-    // next word is identifier like name of a function, variable name
-    // after identifier all are the params/arg, space separated
-}
-Snapshot* buildSnapshot(Stack<Frame>& callStack)
+    if (tokens == nullptr || maxTokens <= 0)
+    {
+        return 0;
+    }
+
+    int32_t tokenCount = 0;
+    size_t position = 0;
+
+    while (position < line.size())
+    {
+        // Skip spaces and tabs.
+        while (position < line.size() &&
+            (line[position] == ' ' || line[position] == '\t'))
+        {
+            position++;
+        }
+
+        // End of line.
+        if (position >= line.size())
+        {
+            break;
+        }
+
+        // Find the end of this word.
+        size_t end = position;
+
+        while (end < line.size() &&
+            line[end] != ' ' &&
+            line[end] != '\t')
+        {
+            end++;
+        }
+
+        if (tokenCount >= maxTokens)
+        {
+            return -1;
+        }
+
+        string word = line.substr(position, end - position);
+
+        // First word is always the instruction keyword.
+        if (tokenCount == 0)
+        {
+            tokens[tokenCount].type = KEYWORD;
+        }
+        // Second word is the identifier.
+        else if (tokenCount == 1)
+        {
+            tokens[tokenCount].type = IDENTIFIER;
+        }
+        // Remaining words are parameters/arguments.
+        else
+        {
+            tokens[tokenCount].type = PARAM;
+        }
+
+        tokens[tokenCount].text = word;
+
+        tokenCount++;
+        position = end;
+    }
+
+    return tokenCount;
+}Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
     // build the snapshot based on the callStack given
 }
